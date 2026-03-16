@@ -1,3 +1,9 @@
+# Railway-X Customizations
+This repository contains the Keycloak Themes for the CentralIDP and SharedIDP login pages.
+They were customized for Railway-X by:
+* replacing 'Catena-X' wording with 'Railway-X'
+* showing a development environment warning based on the hostname
+
 ![LeadingRepository](https://img.shields.io/badge/Leading_Repository-blue)
 
 # IAM: Keycloak instances
