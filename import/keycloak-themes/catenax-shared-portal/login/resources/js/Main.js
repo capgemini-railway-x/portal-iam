@@ -474,6 +474,20 @@ class Footer extends Viewable {
 
 }
 
+class EnvWarning extends Viewable {
+    constructor() {
+        super()
+        this.view = N(
+            'span',
+            [
+                N('h1', 'DEV Environment'),
+                N('p', 'Expect unavailabilities and potential data loss.')
+            ],
+            { style: 'text-align: center; background-color: orangered;' }
+        )
+    }
+}
+
 addEvents(
     window,
     {
@@ -482,7 +496,13 @@ addEvents(
             const realm = document.getElementById('kc-header-wrapper').firstChild.data
             const content = document.getElementById('kc-content')
             const form = Form.fromPage()
-            new App(true)
+
+            let app = new App(true)
+            if (window.location.hostname.includes('.dev.')) {
+                app.append(new EnvWarning())
+            }
+
+            app
                 .append(new Header(title).append(content))
                 .append(
                     new Main().append(
