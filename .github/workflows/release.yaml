@@ -22,97 +22,42 @@ name: Release
 on:
   workflow_dispatch:
   push:
+    tags:
+      - 'v*.*.*'
     paths:
       - 'charts/**'
     branches:
       - main
 
+env:
+  REF_NAME: '${{ github.ref_name }}'
+
 jobs:
-  release-helm-chart:
-    # depending on default permission settings for your org (contents being read-only or read-write for workloads), you will have to add permissions
-    # see: https://docs.github.com/en/actions/security-guides/automatic-token-authentication#modifying-the-permissions-for-the-github_token
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
-    outputs:
-      chart-version: ${{ steps.chart-version.outputs.current }}
-      version-check: ${{ steps.version-check.outputs.exists }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-
-      - name: Configure Git
-        run: |
-          git config user.name "$GITHUB_ACTOR"
-          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
-
-      - name: Install Helm
-        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4
-
-      - name: Update Helm dependencies for centralidp
-        run: |
-          cd charts/centralidp
-          helm repo add bitnami-full-index https://raw.githubusercontent.com/bitnami/charts/archive-full-index/bitnami
-          helm dependency update
-
-      - name: Update Helm dependencies for sharedidp
-        run: |
-          cd charts/sharedidp
-          helm repo add bitnami-full-index https://raw.githubusercontent.com/bitnami/charts/archive-full-index/bitnami
-          helm dependency update
-
-      - name: Run chart-releaser
-        uses: helm/chart-releaser-action@v1.7.0
-        env:
-          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-          CR_SKIP_EXISTING: "true"
-
-        # As centralidp and sharedidp are currently always upgraded together, just checking centralidp version
-      - name: Get current chart version from centralidp
-        id: chart-version
-        run: |
-          current=$(cat ./charts/centralidp/Chart.yaml | grep "version:" | head -1 | cut -d ":" -d " " -f2)
-          echo "current=$current" >> $GITHUB_OUTPUT
-          echo "Exported $current chart version"
-
-      - name: Check for previous version
-        id: version-check
-        run: |
-          exists=$(git tag -l "v${{ steps.chart-version.outputs.current }}")
-          if [[ -n "$exists" ]]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
-
   release-images:
-    needs: release-helm-chart
-    if: needs.release-helm-chart.outputs.version-check == 'false'
     permissions:
+      id-token: write
       contents: read
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          - image: tractusx/portal-iam
-            dockerfile: ./docker/Dockerfile.import
+          - dockerfile: ./docker/Dockerfile.import
             dockernotice: ./docker/notice-iam.md
-    outputs:
-      chart-version: ${{ steps.chart-version.outputs.current }}
-      version-check: ${{ steps.version-check.outputs.exists }}
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
 
-      - name: Login to DockerHub
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6
         with:
-          username: ${{ secrets.DOCKER_HUB_USER }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
@@ -125,17 +70,15 @@ jobs:
         id: meta
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
         with:
-          images: ${{ matrix.image }}
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ github.event.repository.name }}
           # Automatically prepare image tags; See action docs for more examples. 
           # semver patter will generate tags like these for example :1 :1.2 :1.2.3
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
             type=raw,value=latest
-            type=raw,value=v${{ needs.release-helm-chart.outputs.chart-version }}
-            type=semver,pattern={{version}},value=${{ needs.release-helm-chart.outputs.chart-version }}
-            type=semver,pattern={{major}},value=${{ needs.release-helm-chart.outputs.chart-version }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release-helm-chart.outputs.chart-version }}
+            type=raw,value=${{ env.REF_NAME }}
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}
+            type=semver,pattern=v{{major}}.{{minor}}
 
       - name: Build and push Docker images
         uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
@@ -148,28 +91,3 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      # https://github.com/peter-evans/dockerhub-description
-      - name: Update Docker Hub description
-        uses: peter-evans/dockerhub-description@432a30c9e07499fd01da9f8a49f0faf9e0ca5b77 # v4.0.2
-        with:
-          username: ${{ secrets.DOCKER_HUB_USER }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-          repository: ${{ matrix.image }}
-          readme-filepath: ${{ matrix.dockernotice }}
-
-  create-tag:
-    needs: [release-helm-chart, release-images]
-    if: needs.release-helm-chart.outputs.version-check == 'false'
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-
-      - name: Create and push git tag
-        run: |
-          git tag v${{ needs.release-helm-chart.outputs.chart-version }}
-          git push origin v${{ needs.release-helm-chart.outputs.chart-version }}
